@@ -1,0 +1,137 @@
+#!/bin/bash
+set -euo pipefail
+source "$(cd "$(dirname "$0")/.." && pwd)/scripts/common.sh"
+if [[ ${1:-} == --ssh ]]; then
+  shift
+  [[ -f "$LAB_STATE/ssh/config" ]] || die 'Start a guest with launch-linux first.'
+  exec ssh -F "$LAB_STATE/ssh/config" linux-lab "$@"
+fi
+if [[ ${1:-} == --attach-gdb ]]; then
+  shift
+  ref=${1:-}
+  if [[ -n $ref ]]; then
+    resolve_build "$ref"
+  else
+    [[ -f "$LAB_STATE/last-build" ]] || die 'Run build-linux --debug first.'
+    LAB_KEY=$(cat "$LAB_STATE/last-build")
+    LAB_ARTIFACTS="$LAB_STATE/builds/$LAB_KEY"
+  fi
+  [[ -s "$LAB_ARTIFACTS/vmlinux" ]] || die "No vmlinux found in $LAB_ARTIFACTS; build with: build-linux --debug"
+  gdb_port=$LAB_GDB_PORT
+  if command -v aarch64-elf-gdb >/dev/null 2>&1; then
+    exec aarch64-elf-gdb "$LAB_ARTIFACTS/vmlinux" \
+      -ex "set substitute-path /work/$LAB_KEY/src $LAB_SOURCE" \
+      -ex "target remote 127.0.0.1:$gdb_port"
+  elif command -v lldb >/dev/null 2>&1; then
+    exec lldb "$LAB_ARTIFACTS/vmlinux" \
+      -o "settings set target.source-map /work/$LAB_KEY/src $LAB_SOURCE" \
+      -o "gdb-remote 127.0.0.1:$gdb_port"
+  else
+    die 'Install aarch64-elf-gdb (brew install aarch64-elf-gdb) or Xcode Command Line Tools (lldb).'
+  fi
+fi
+if [[ ${1:-} == --help ]]; then
+  echo 'Usage: launch-linux [current|GIT_REF] [--smoke] [--gdb|--gdb-wait]'
+  echo '       launch-linux --ssh [SSH_COMMAND...]  # connect to the running guest'
+  echo '       launch-linux --attach-gdb [GIT_REF]  # attach aarch64-elf-gdb or lldb to gdbstub'
+  echo 'Without a ref, boots the most recently successful build. --smoke boots, runs checks, powers off.'
+  echo '  --gdb       Open QEMU gdbstub on 127.0.0.1:<gdb_port> with nokaslr.'
+  echo '  --gdb-wait  Same as --gdb, but pause CPU at reset until debugger attaches.'
+  exit
+fi
+ref= smoke=0 gdb=0 gdb_wait=0
+for arg in "$@"; do
+  case "$arg" in
+    --smoke) smoke=1 ;;
+    --gdb) gdb=1 ;;
+    --gdb-wait) gdb=1; gdb_wait=1 ;;
+    *) [[ -z $ref ]] || die 'Only one Git ref may be supplied.'; ref=$arg ;;
+  esac
+done
+require_tool qemu-system-aarch64
+require_tool qemu-img
+if [[ -n $ref ]]; then
+  resolve_build "$ref"
+else
+  [[ -f "$LAB_STATE/last-build" ]] || die 'Run build-linux first.'
+  LAB_KEY=$(cat "$LAB_STATE/last-build")
+  LAB_ARTIFACTS="$LAB_STATE/builds/$LAB_KEY"
+fi
+[[ -s "$LAB_ARTIFACTS/Image" ]] || die 'No kernel found for this ref; run build-linux for it first.'
+[[ -s "$LAB_STATE/$LAB_ROOTFS_NAME" ]] || die 'Run setup-linux-lab first.'
+acquire_lock "$LAB_STATE/guest.lock" "Guest already running"
+trap 'release_lock "$LAB_STATE/guest.lock"' EXIT INT TERM HUP
+
+rootfs_base="${LAB_ROOTFS_NAME%.raw}"
+disk="$LAB_ARTIFACTS/${rootfs_base}.qcow2"
+if [[ ! -f $disk ]]; then
+  qemu-img create -f qcow2 -F raw -b "$LAB_STATE/$LAB_ROOTFS_NAME" "$disk"
+  if [[ -f "$LAB_STATE/ssh/known_hosts" ]]; then
+    ssh-keygen -R "linux-lab-$LAB_KEY" -f "$LAB_STATE/ssh/known_hosts" >/dev/null 2>&1 || true
+  fi
+fi
+
+accel=$LAB_VM_ACCEL
+cpu=host
+[[ $accel != tcg ]] || cpu=max
+cmdline="root=/dev/vda rw rootwait console=ttyAMA0 init=/sbin/lab-init panic=-1 kunit.enable=1 kunit.autorun=1 lab.hostname=$LAB_VM_HOSTNAME"
+if [[ $smoke == 1 ]]; then
+  cmdline="$cmdline lab.smoke=1"
+  [[ -z "${LAB_SMOKE_CHECK_PATHS:-}" ]] || cmdline="$cmdline lab.smoke_paths=$LAB_SMOKE_CHECK_PATHS"
+fi
+
+gdb_args=()
+if [[ $gdb == 1 ]]; then
+  gdb_port=$LAB_GDB_PORT
+  case "$gdb_port" in ''|*[!0-9]*) die 'gdb_port must be numeric.' ;; esac
+  [[ $gdb_port -gt 0 && $gdb_port -le 65535 ]] || die 'gdb_port must be 1..65535.'
+  cmdline="$cmdline nokaslr"
+  gdb_args=(-gdb "tcp:127.0.0.1:$gdb_port")
+  [[ $gdb_wait == 0 ]] || gdb_args+=(-S)
+  echo "QEMU gdbstub listening on 127.0.0.1:$gdb_port (attach with: launch-linux --attach-gdb)"
+  if [[ ! -s "$LAB_ARTIFACTS/vmlinux" ]]; then
+    echo "Warning: $LAB_ARTIFACTS/vmlinux not found; rebuild with 'build-linux --debug' for symbols." >&2
+  fi
+fi
+
+ssh_port=$LAB_SSH_PORT
+case "$ssh_port" in ''|*[!0-9]*) die 'ssh_port must be numeric.' ;; esac
+[[ $ssh_port -gt 0 && $ssh_port -le 65535 ]] || die 'ssh_port must be 1..65535.'
+cat > "$LAB_STATE/ssh/config" <<CONFIG
+Host linux-lab
+    HostName 127.0.0.1
+    Port $ssh_port
+    User root
+    IdentityFile "$LAB_STATE/ssh/id_ed25519"
+    IdentitiesOnly yes
+    UserKnownHostsFile "$LAB_STATE/ssh/known_hosts"
+    HostKeyAlias linux-lab-$LAB_KEY
+    StrictHostKeyChecking accept-new
+CONFIG
+echo "SSH from another terminal: launch-linux --ssh (127.0.0.1:$ssh_port)"
+
+virtfs_args=()
+if [[ -n "${LAB_SOURCE:-}" && -d "$LAB_SOURCE" ]]; then
+  virtfs_args=(-virtfs "local,path=$LAB_SOURCE,mount_tag=linuxsrc,security_model=none,readonly=on")
+fi
+
+qemu-system-aarch64 -machine virt,gic-version=3 -accel "$accel" -cpu "$cpu" \
+  -smp "$LAB_VM_CPUS" -m "$LAB_VM_MEMORY" \
+  -kernel "$LAB_ARTIFACTS/Image" -append "$cmdline ${LAB_EXTRA_KERNEL_ARGS:-}" \
+  -drive "file=$disk,if=virtio,format=qcow2" \
+  ${virtfs_args[@]+"${virtfs_args[@]}"} \
+  ${gdb_args[@]+"${gdb_args[@]}"} \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$ssh_port-:22" -device virtio-net-pci,netdev=net0 \
+  -device virtio-rng-pci -display none -no-reboot \
+  -chardev "stdio,id=console,mux=on,signal=off,logfile=$LAB_ARTIFACTS/boot.log" \
+  -serial chardev:console -object monitor-hmp,id=monitor,chardev=console
+
+if [[ $smoke == 1 ]]; then
+  grep -q 'LINUX_LAB_SMOKE_STATUS=0' "$LAB_ARTIFACTS/boot.log" || die 'Guest smoke check failed; see boot.log.'
+  if [[ -n "${LAB_SMOKE_KUNIT_PATTERN:-}" ]]; then
+    grep -q "$LAB_SMOKE_KUNIT_PATTERN" "$LAB_ARTIFACTS/boot.log" || die "Expected KUnit pattern '$LAB_SMOKE_KUNIT_PATTERN' missing; see boot.log."
+  fi
+  if grep -Eq '(^|\])[[:space:]]*not ok [0-9]' "$LAB_ARTIFACTS/boot.log"; then
+    die 'KUnit reported a failure; see boot.log.'
+  fi
+fi

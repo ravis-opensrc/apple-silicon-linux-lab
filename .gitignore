@@ -1,0 +1,14 @@
+# Local private configuration (never commit personal paths)
+config.yaml
+
+# Runtime build/VM state, disk images, keys, and logs
+.state/
+*.raw
+*.qcow2
+*.log
+VALIDATION.md
+
+# OS / editor artifacts
+.DS_Store
+__pycache__/
+*.pyc

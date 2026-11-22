@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+source "$(cd "$(dirname "$0")/.." && pwd)/scripts/common.sh"
+if [[ ${1:-} == --help ]]; then
+  echo 'Usage: build-linux [current|GIT_REF] [--debug|--gdb]'
+  echo 'Default: current working tree, including local edits. Named refs use committed snapshots.'
+  echo '  --debug, --gdb  Enable Lockdep, DEBUG_ATOMIC_SLEEP, DWARF debug info, and export vmlinux.'
+  exit
+fi
+ref=
+debug_cfg=${LINUX_DEBUG_CONFIG:-0}
+for arg in "$@"; do
+  case "$arg" in
+    --debug|--gdb) debug_cfg=1 ;;
+    *) [[ -z $ref ]] || die 'Usage: build-linux [current|GIT_REF] [--debug|--gdb]'; ref=$arg ;;
+  esac
+done
+ref=${ref:-current}
+require_tool container
+resolve_build "$ref"
+mkdir -p "$LAB_ARTIFACTS"
+acquire_lock "$LAB_STATE/build.lock" "A build is already running"
+trap 'release_lock "$LAB_STATE/build.lock"' EXIT INT TERM HUP
+container system start
+if ! container image inspect "$LAB_IMAGE" >/dev/null 2>&1; then
+  die "Run setup-linux-lab first."
+fi
+if [[ $LAB_MODE == ref && ! -f "$LAB_ARTIFACTS/source.tar" ]]; then
+  git -C "$LAB_SOURCE" archive --format=tar "$LAB_COMMIT" > "$LAB_ARTIFACTS/source.tar.new"
+  mv "$LAB_ARTIFACTS/source.tar.new" "$LAB_ARTIFACTS/source.tar"
+fi
+echo "Building $ref ($LAB_COMMIT), arm64, $LAB_JOBS jobs (debug=$debug_cfg)"
+container run --rm --cpus "$LAB_JOBS" --memory "$LAB_MEMORY" --entrypoint /bin/bash \
+  -v "$LAB_VOLUME:/work" \
+  --mount "type=bind,source=$LAB_DIR,target=/lab,readonly" \
+  --mount "type=bind,source=$LAB_SOURCE,target=/checkout,readonly" \
+  -v "$LAB_ARTIFACTS:/artifacts" "$LAB_IMAGE" \
+  -c 'cp /lab/scripts/container-build.sh /tmp/linux-lab-build.sh; exec /bin/bash /tmp/linux-lab-build.sh "$@"' \
+  linux-lab-build "$LAB_KEY" "$LAB_MODE" "$LAB_JOBS" "$debug_cfg" \
+  "$LAB_LOCALVERSION" "$LAB_KBUILD_USER" "$LAB_KBUILD_HOST" \
+  "$LAB_CONFIG_FRAGMENTS" "$LAB_OPTIONAL_KCONFIGS" "$LAB_REQUIRED_KCONFIGS" \
+  2>&1 | tee "$LAB_ARTIFACTS/build.log"
+rm -f "$LAB_ARTIFACTS/source.tar" "$LAB_ARTIFACTS/source.tar.new"
+printf '%s\n' "$LAB_COMMIT" > "$LAB_ARTIFACTS/commit"
+git -C "$LAB_SOURCE" status --porcelain > "$LAB_ARTIFACTS/source-status"
+printf '%s\n' "$LAB_KEY" > "$LAB_STATE/last-build"
+echo "Artifacts: $LAB_ARTIFACTS"
+if [[ $debug_cfg == 1 ]]; then
+  echo "Debug symbols: $LAB_ARTIFACTS/vmlinux"
+  echo "Launch with GDB stub: launch-linux $ref --gdb (or --gdb-wait)"
+else
+  echo "Launch: launch-linux $ref"
+fi

@@ -1,0 +1,62 @@
+# Apple Silicon Linux Kernel Lab configuration
+# Copy this file to config.yaml and adjust paths for your machine.
+# config.yaml is gitignored so your local paths stay private.
+
+source:
+  # Path to your Linux kernel Git checkout (required)
+  path: ~/src/linux
+
+  # Optional: macOS case-sensitive sparsebundle auto-mount (leave empty if unused)
+  sparsebundle: ""
+  mountpoint: ""
+
+state:
+  # Where built kernels, overlays, SSH keys, and logs are stored (default: <repo>/.state)
+  dir: ""
+
+container:
+  image: local/linux-lab-builder:debian13-v1
+  volume: linux-lab-work
+
+build:
+  # Parallel make jobs (0 = auto-detect via sysctl -n hw.ncpu)
+  jobs: 0
+  memory: 8G
+  localversion: -linux-lab
+  kbuild_user: ""
+  kbuild_host: apple-container
+
+kernel:
+  # Kconfig fragments merged in order (paths relative to repo root, or absolute)
+  fragments:
+    - configs/base.config
+    # Uncomment for MM / DAMON development:
+    # - configs/damon.config
+
+  # Optional Kconfig symbols enabled automatically if defined by the target tree
+  optional_kconfigs: []
+    # - DAMON_PERF_SOURCE
+    # - DAMON_PADDR_KUNIT_TEST
+
+  # Extra Kconfig symbols verified to be =y after Kconfig resolution
+  required_kconfigs: []
+    # - DAMON
+    # - DAMON_VADDR
+    # - DAMON_PADDR
+    # - DAMON_SYSFS
+    # - DAMON_KUNIT_TEST
+
+vm:
+  hostname: linux-lab
+  cpus: 4
+  memory: 4G
+  accel: hvf
+  ssh_port: 2222
+  gdb_port: 1234
+  rootfs_name: alpine-3.24.4-lab-v5.raw
+  extra_kernel_args: ""
+  # Optional paths checked inside the guest during --smoke
+  smoke_check_paths: []
+    # - /sys/kernel/mm/damon/admin/kdamonds
+  # Optional regex matched against boot.log during --smoke to confirm KUnit ran
+  smoke_kunit_pattern: "# Subtest:"
