@@ -7,9 +7,8 @@ debug_cfg=${4:-0}
 localversion=${5:--linux-lab}
 kbuild_user=${6:-builder}
 kbuild_host=${7:-apple-container}
-fragments=${8:-configs/base.config}
-opt_kconfigs=${9:-}
-req_kconfigs=${10:-}
+opt_kconfigs=${8:-}
+req_kconfigs=${9:-}
 
 mkdir -p "/work/$key/src" "/work/$key/out" /work/ccache
 src="/work/$key/src"
@@ -26,30 +25,19 @@ else
   fi
 fi
 
-: > "$out/requested.config"
-for frag in $fragments; do
-  if [[ $frag == /* ]]; then
-    frag_path=$frag
-  else
-    frag_path="/lab/$frag"
-  fi
-  [[ -f "$frag_path" ]] || { echo "Missing Kconfig fragment: $frag_path" >&2; exit 1; }
-  cat "$frag_path" >> "$out/requested.config"
-  printf '\n' >> "$out/requested.config"
+cp /artifacts/requested.config "$out/requested.config"
+enabled_optional=$(python3 - "$src" "$opt_kconfigs" <<'KCONFIG'
+import pathlib, re, sys
+symbols = set()
+for path in pathlib.Path(sys.argv[1]).rglob('Kconfig*'):
+    if path.is_file():
+        symbols.update(re.findall(r'^\s*(?:menu)?config\s+([A-Z0-9_]+)\s*$', path.read_text(errors='replace'), re.M))
+print(' '.join(name for name in sys.argv[2].split() if name in symbols))
+KCONFIG
+)
+for sym in $enabled_optional; do
+  printf 'CONFIG_%s=y\n' "$sym" >> "$out/requested.config"
 done
-
-enabled_optional=""
-for sym in $opt_kconfigs; do
-  if find "$src" -name Kconfig -exec grep -q "^config ${sym}$" {} + 2>/dev/null; then
-    echo "CONFIG_${sym}=y" >> "$out/requested.config"
-    enabled_optional="$enabled_optional $sym"
-  fi
-done
-
-if [[ $debug_cfg == 1 ]]; then
-  cat /lab/configs/debug.config >> "$out/requested.config"
-  printf '\n' >> "$out/requested.config"
-fi
 
 export CCACHE_DIR=/work/ccache
 export CCACHE_BASEDIR="$src"
@@ -90,4 +78,6 @@ if [[ $debug_cfg == 1 ]]; then
 else
   rm -f /artifacts/vmlinux /artifacts/vmlinux.new
 fi
+tar -cf /artifacts/source.tar.new -C "$src" .
+mv /artifacts/source.tar.new /artifacts/source.tar
 echo 'Kernel built successfully.'

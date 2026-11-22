@@ -3,34 +3,40 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")/.." && pwd)/scripts/common.sh"
 if [[ ${1:-} == --help ]]; then
   echo 'Usage: build-linux [current|GIT_REF] [--debug|--gdb]'
-  echo 'Default: current working tree, including local edits. Named refs use committed snapshots.'
-  echo '  --debug, --gdb  Enable Lockdep, DEBUG_ATOMIC_SLEEP, DWARF debug info, and export vmlinux.'
   exit
 fi
-ref=
-debug_cfg=${LINUX_DEBUG_CONFIG:-0}
+ref= debug_cfg=${LINUX_DEBUG_CONFIG:-0}
 for arg in "$@"; do
   case "$arg" in
     --debug|--gdb) debug_cfg=1 ;;
-    *) [[ -z $ref ]] || die 'Usage: build-linux [current|GIT_REF] [--debug|--gdb]'; ref=$arg ;;
+    --*) die "Unknown option: $arg" ;;
+    *) [[ -z $ref ]] || die 'Only one Git ref may be supplied.'; ref=$arg ;;
   esac
 done
 ref=${ref:-current}
 require_tool container
 resolve_build "$ref"
-mkdir -p "$LAB_ARTIFACTS"
-acquire_lock "$LAB_STATE/build.lock" "A build is already running"
-trap 'release_lock "$LAB_STATE/build.lock"' EXIT INT TERM HUP
+python3 "$LAB_DIR/scripts/lab-state.py" validate-snapshots "$LAB_SOURCE" "$LAB_SNAPSHOT_DIR"
+acquire_lock "$LAB_STATE/build.lock" 'A setup or build is already running'
+install_lifecycle "$LAB_STATE/build.lock"
+run="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+LAB_ARTIFACTS="$LAB_GROUP/runs/$run"
+LAB_BUILD_SOURCE="$LAB_SNAPSHOT_DIR/$LAB_KEY-$run"
+mkdir -p "$LAB_ARTIFACTS" "$LAB_BUILD_SOURCE"
+python3 "$LAB_DIR/scripts/lab-state.py" stage "$LAB_DIR" "$LAB_ARTIFACTS" "$LAB_CONFIG_FRAGMENTS_JSON" "$debug_cfg"
 container system start
-if ! container image inspect "$LAB_IMAGE" >/dev/null 2>&1; then
-  die "Run setup-linux-lab first."
+container image inspect "$LAB_IMAGE" >/dev/null || die 'Run setup-linux-lab first.'
+if [[ $LAB_MODE == ref ]]; then
+  git -C "$LAB_SOURCE" archive --format=tar "$LAB_COMMIT" > "$LAB_ARTIFACTS/source.tar"
+  : > "$LAB_ARTIFACTS/source-status"
+else
+  git -C "$LAB_SOURCE" status --porcelain > "$LAB_ARTIFACTS/source-status"
 fi
-if [[ $LAB_MODE == ref && ! -f "$LAB_ARTIFACTS/source.tar" ]]; then
-  git -C "$LAB_SOURCE" archive --format=tar "$LAB_COMMIT" > "$LAB_ARTIFACTS/source.tar.new"
-  mv "$LAB_ARTIFACTS/source.tar.new" "$LAB_ARTIFACTS/source.tar"
-fi
+printf '%s\n' "$LAB_COMMIT" > "$LAB_ARTIFACTS/commit"
 echo "Building $ref ($LAB_COMMIT), arm64, $LAB_JOBS jobs (debug=$debug_cfg)"
-container run --rm --cpus "$LAB_JOBS" --memory "$LAB_MEMORY" --entrypoint /bin/bash \
+name="linux-lab-build-$$"
+run_owned python3 "$LAB_DIR/scripts/run-command.py" --log "$LAB_ARTIFACTS/build.log" --container-name "$name" -- \
+  container run --rm --name "$name" --cpus "$LAB_JOBS" --memory "$LAB_MEMORY" --entrypoint /bin/bash \
   -v "$LAB_VOLUME:/work" \
   --mount "type=bind,source=$LAB_DIR,target=/lab,readonly" \
   --mount "type=bind,source=$LAB_SOURCE,target=/checkout,readonly" \
@@ -38,16 +44,11 @@ container run --rm --cpus "$LAB_JOBS" --memory "$LAB_MEMORY" --entrypoint /bin/b
   -c 'cp /lab/scripts/container-build.sh /tmp/linux-lab-build.sh; exec /bin/bash /tmp/linux-lab-build.sh "$@"' \
   linux-lab-build "$LAB_KEY" "$LAB_MODE" "$LAB_JOBS" "$debug_cfg" \
   "$LAB_LOCALVERSION" "$LAB_KBUILD_USER" "$LAB_KBUILD_HOST" \
-  "$LAB_CONFIG_FRAGMENTS" "$LAB_OPTIONAL_KCONFIGS" "$LAB_REQUIRED_KCONFIGS" \
-  2>&1 | tee "$LAB_ARTIFACTS/build.log"
-rm -f "$LAB_ARTIFACTS/source.tar" "$LAB_ARTIFACTS/source.tar.new"
-printf '%s\n' "$LAB_COMMIT" > "$LAB_ARTIFACTS/commit"
-git -C "$LAB_SOURCE" status --porcelain > "$LAB_ARTIFACTS/source-status"
-printf '%s\n' "$LAB_KEY" > "$LAB_STATE/last-build"
+  "$LAB_OPTIONAL_KCONFIGS" "$LAB_REQUIRED_KCONFIGS"
+# The source checkout is already on a case-sensitive filesystem. Keep snapshots
+# beside it so case-distinct Linux headers survive export to macOS.
+tar -xf "$LAB_ARTIFACTS/source.tar" -C "$LAB_BUILD_SOURCE"
+rm "$LAB_ARTIFACTS/source.tar"
+python3 "$LAB_DIR/scripts/lab-state.py" publish "$LAB_STATE" "$LAB_ARTIFACTS" "$LAB_KEY" "$LAB_COMMIT" "$LAB_BUILD_SOURCE" "$debug_cfg"
 echo "Artifacts: $LAB_ARTIFACTS"
-if [[ $debug_cfg == 1 ]]; then
-  echo "Debug symbols: $LAB_ARTIFACTS/vmlinux"
-  echo "Launch with GDB stub: launch-linux $ref --gdb (or --gdb-wait)"
-else
-  echo "Launch: launch-linux $ref"
-fi
+echo "Launch: launch-linux $ref"

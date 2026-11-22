@@ -7,6 +7,7 @@ LAB_* variable assignments.
 """
 
 import os
+import json
 import pathlib
 import shlex
 import subprocess
@@ -91,7 +92,10 @@ def main() -> None:
     lab_dir = pathlib.Path(sys.argv[1]).resolve()
     cfg_candidates = []
     if os.environ.get("LINUX_LAB_CONFIG"):
-        cfg_candidates.append(pathlib.Path(expand_path(os.environ["LINUX_LAB_CONFIG"])))
+        explicit = pathlib.Path(expand_path(os.environ["LINUX_LAB_CONFIG"]))
+        if not explicit.is_file():
+            raise SystemExit(f"Configuration file not found: {explicit}")
+        cfg_candidates.append(explicit)
     cfg_candidates.append(lab_dir / "config.yaml")
     cfg_candidates.append(pathlib.Path.home() / ".config" / "linux-lab" / "config.yaml")
 
@@ -102,11 +106,11 @@ def main() -> None:
         v = cfg.get(sec, {}).get(key, default)
         if isinstance(v, list):
             return " ".join(v)
-        return str(v) if v not in (None, "") else default
+        return str(v) if v is not None else default
 
     def get_list(sec: str, key: str, default: list) -> list:
         v = cfg.get(sec, {}).get(key)
-        if isinstance(v, list) and v:
+        if isinstance(v, list):
             return v
         if isinstance(v, str) and v.strip():
             return v.split()
@@ -144,7 +148,7 @@ def main() -> None:
     vm_accel = os.environ.get("LINUX_QEMU_ACCEL") or get_val("vm", "accel", "hvf")
     ssh_port = os.environ.get("LINUX_SSH_PORT") or get_val("vm", "ssh_port", "2222")
     gdb_port = os.environ.get("LINUX_GDB_PORT") or get_val("vm", "gdb_port", "1234")
-    rootfs_name = os.environ.get("LINUX_ROOTFS_NAME") or get_val("vm", "rootfs_name", "alpine-3.24.4-lab-v5.raw")
+    rootfs_name = os.environ.get("LINUX_ROOTFS_NAME") or get_val("vm", "rootfs_name", "alpine-3.24.4-lab-v6.raw")
     extra_args = os.environ.get("LINUX_KERNEL_ARGS") or get_val("vm", "extra_kernel_args", "")
     smoke_paths = get_list("vm", "smoke_check_paths", [])
     smoke_kunit = get_val("vm", "smoke_kunit_pattern", "# Subtest:")
@@ -162,7 +166,8 @@ def main() -> None:
         "LAB_LOCALVERSION": localversion,
         "LAB_KBUILD_USER": kbuild_user,
         "LAB_KBUILD_HOST": kbuild_host,
-        "LAB_CONFIG_FRAGMENTS": " ".join(fragments),
+        "LAB_CONFIG_FRAGMENTS_JSON": json.dumps(fragments),
+        "LAB_SNAPSHOT_DIR": expand_path(os.environ.get("LINUX_LAB_SNAPSHOTS") or get_val("source", "snapshots_dir", "")) or str(pathlib.Path(source_path).parent / ".linux-lab-sources"),
         "LAB_OPTIONAL_KCONFIGS": " ".join(opt_kconfigs),
         "LAB_REQUIRED_KCONFIGS": " ".join(req_kconfigs),
         "LAB_VM_HOSTNAME": vm_hostname,
@@ -175,6 +180,7 @@ def main() -> None:
         "LAB_EXTRA_KERNEL_ARGS": extra_args,
         "LAB_SMOKE_CHECK_PATHS": ",".join(smoke_paths),
         "LAB_SMOKE_KUNIT_PATTERN": smoke_kunit,
+        "LAB_SMOKE_TIMEOUT": os.environ.get("LINUX_SMOKE_TIMEOUT") or get_val("vm", "smoke_timeout", "180"),
     }
     for k, v in exports.items():
         print(f"{k}={shlex.quote(v)}")

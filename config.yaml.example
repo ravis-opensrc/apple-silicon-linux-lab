@@ -7,6 +7,10 @@ source:
   path: ~/src/linux
 
   # Optional: macOS case-sensitive sparsebundle auto-mount (leave empty if unused)
+  # Matching immutable build sources; default: <source.path parent>/.linux-lab-sources
+  # Keep this on a case-sensitive filesystem (like the kernel checkout).
+  snapshots_dir: ""
+
   sparsebundle: ""
   mountpoint: ""
 
@@ -53,10 +57,12 @@ vm:
   accel: hvf
   ssh_port: 2222
   gdb_port: 1234
-  rootfs_name: alpine-3.24.4-lab-v5.raw
+  rootfs_name: alpine-3.24.4-lab-v6.raw
   extra_kernel_args: ""
   # Optional paths checked inside the guest during --smoke
   smoke_check_paths: []
     # - /sys/kernel/mm/damon/admin/kdamonds
   # Optional regex matched against boot.log during --smoke to confirm KUnit ran
   smoke_kunit_pattern: "# Subtest:"
+  # Maximum wall-clock boot/check duration; timeout returns exit status 124.
+  smoke_timeout: 180

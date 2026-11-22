@@ -6,7 +6,7 @@ elif [ -n "${ZSH_VERSION:-}" ]; then
 else
   _LINUX_LAB_DIR=$(pwd)
 fi
-alias setup-linux-lab="$_LINUX_LAB_DIR/bin/setup-linux-lab"
-alias build-linux="$_LINUX_LAB_DIR/bin/build-linux"
-alias launch-linux="$_LINUX_LAB_DIR/bin/launch-linux"
+alias setup-linux-lab="$(printf '%q' "$_LINUX_LAB_DIR/bin/setup-linux-lab")"
+alias build-linux="$(printf '%q' "$_LINUX_LAB_DIR/bin/build-linux")"
+alias launch-linux="$(printf '%q' "$_LINUX_LAB_DIR/bin/launch-linux")"
 unset _LINUX_LAB_DIR

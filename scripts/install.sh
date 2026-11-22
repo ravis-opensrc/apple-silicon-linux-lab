@@ -5,10 +5,10 @@ bin_dir=${LINUX_LAB_BIN_DIR:-$HOME/.local/bin}
 mkdir -p "$bin_dir"
 
 for cmd in setup-linux-lab build-linux launch-linux; do
-  cat > "$bin_dir/$cmd" <<WRAP
-#!/bin/bash
-exec "$lab_dir/bin/$cmd" "\$@"
-WRAP
+  {
+    printf '#!/bin/bash\n'
+    printf 'exec %q "$@"\n' "$lab_dir/bin/$cmd"
+  } > "$bin_dir/$cmd"
   chmod 755 "$bin_dir/$cmd"
 done
 

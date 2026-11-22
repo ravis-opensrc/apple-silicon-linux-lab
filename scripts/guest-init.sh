@@ -30,7 +30,10 @@ echo "LINUX_LAB_BOOTED $(uname -r)"
 echo 'Root console; exit the shell to power off. QEMU: Ctrl-a x to quit.'
 if grep -q 'lab.smoke=1' /proc/cmdline; then
   status=0
-  test -d /sys/fs/cgroup || status=1
+  awk '$2 == "/sys/fs/cgroup" && $3 == "cgroup2" { found=1 } END { exit !found }' /proc/mounts || status=1
+  awk '$2 == "/sys/kernel/debug" && $3 == "debugfs" { found=1 } END { exit !found }' /proc/mounts || status=1
+  awk '$2 == "/sys/kernel/tracing" && $3 == "tracefs" { found=1 } END { exit !found }' /proc/mounts || status=1
+  awk '$2 == "/mnt/src" && $3 == "9p" { found=1 } END { exit !found }' /proc/mounts || status=1
   test -d /mnt/src/kernel || status=1
   test -f /proc/config.gz || status=1
   if [ -n "$smoke_paths" ]; then

@@ -4,9 +4,10 @@ Fast, self-contained tooling to **build, boot, test (KUnit & selftests), and
 step-debug** upstream Linux arm64 kernels on Apple Silicon Macs using Apple's
 native `container` CLI and QEMU (`hvf` hardware acceleration).
 
-Your kernel Git checkout is mounted **read-only** into both the builder
-container and the QEMU guest (`/mnt/src` via `9p`), so this lab never mutates
-your branch or writes build artifacts into your source tree.
+Your kernel Git checkout is mounted **read-only** into the builder. Each
+successful build exports a matching source snapshot, which the QEMU guest
+mounts read-only at `/mnt/src` via `9p`. The lab never switches your branch or
+writes build artifacts into the checkout.
 
 ## Features
 
@@ -14,7 +15,7 @@ your branch or writes build artifacts into your source tree.
   with persistent sparse build volume (`64 GiB`) and shared `ccache`.
 - **Instant QEMU `virt` boot with HVF**: Boots Alpine arm64 in seconds with
   per-build `qcow2` overlays, auto-run KUnit, `cgroup2`, `debugfs`, `tracefs`,
-  read-only host checkout at `/mnt/src`, and passwordless SSH.
+  read-only matching build source at `/mnt/src`, and passwordless SSH.
 - **Modular Kconfig fragments**: Base minimal `arm64` QEMU config
   (`configs/base.config`) plus optional subsystem fragments (e.g.,
   `configs/damon.config`) and debug overlay (`configs/debug.config`).
@@ -72,9 +73,18 @@ launch-linux --ssh
 launch-linux --smoke
 ```
 
-Inside the guest, your host kernel checkout is mounted read-only at `/mnt/src`,
-so you can run kselftests directly (for example,
-`/mnt/src/tools/testing/selftests/damon/sysfs.sh`).
+Inside the guest, `/mnt/src` contains the exact source snapshot used by that
+build, including local edits for a working-tree build. Run shell selftests from
+their own directory so relative helpers resolve:
+
+```sh
+cd /mnt/src/tools/testing/selftests/damon
+./sysfs.sh
+```
+
+Selftests that need compiled binaries must be built/staged separately into
+writable guest storage; a read-only source mount is not an installed selftest
+suite.
 
 Exit the guest shell (or run `poweroff -f`) to shut down. QEMU's escape key is
 **Ctrl-a, then x**.
@@ -89,7 +99,7 @@ build-linux --debug
 launch-linux --gdb             # boot immediately, attach anytime
 launch-linux --gdb-wait        # pause at CPU reset for early-boot/KUnit breakpoints
 
-# 3. Terminal 2: attach debugger (auto-maps container build paths to source.path)
+# 3. Terminal 2: attach to the running VM and its matching source snapshot
 launch-linux --attach-gdb
 ```
 
@@ -118,3 +128,58 @@ Precedence: **CLI flags** > **Environment variables** (`LINUX_SOURCE`,
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE).
+
+## Build generations and source provenance
+
+Each successful build creates `.state/builds/<key>/runs/<generation>/` with
+`Image`, resolved `config`, `System.map`, optional debug `vmlinux`, logs and a
+`manifest.json`. `build-linux` atomically publishes that generation as the
+latest only after compilation and source export both succeed. Older generations
+are retained. An existing legacy build without a manifest must be rebuilt once.
+
+Source snapshots default to `<source.path parent>/.linux-lab-sources/`, beside
+the kernel checkout on its case-sensitive filesystem. Override this with
+`source.snapshots_dir` or `LINUX_LAB_SNAPSHOTS`; the destination must also be
+case-sensitive and outside the kernel checkout. Snapshots consume roughly one source-tree copy per build and
+are retained with their generation. Do not edit or remove snapshots, build
+artifacts or backing images while a VM/debugger uses them. Cleanup is manual.
+
+The guest root disk remains persistent per build key and base-image version,
+so rebuilding `current` does not discard installed guest tools. Existing disks
+are preserved; the updated smoke init uses a new `lab-v6` base image.
+
+`.state/guest.json` records the live QEMU PID, generation, matching source and
+GDB port. `--attach-gdb` uses this record, even if a newer build has completed.
+An optional ref argument must match the running guest. Debug symbols/source
+from a different build are never selected via `last-build`.
+
+Absolute and space-containing fragment paths are supported: fragments are
+staged into the artifact directory before the container starts. Do not edit
+the checkout while it is being copied for a working-tree build.
+
+## Smoke checks and regression tests
+
+`launch-linux --smoke` verifies the guest status, configured KUnit output, and
+actual `9p`, `cgroup2`, `debugfs` and `tracefs` mounts. It defaults to a 180-second
+wall-clock deadline. Set `vm.smoke_timeout` or `LINUX_SMOKE_TIMEOUT` to change it;
+a timeout stops QEMU and returns status **124**. `--gdb-wait` cannot be combined
+with `--smoke`. Set `vm.smoke_kunit_pattern: ""` to omit the KUnit-presence check;
+reported KUnit failures still fail the smoke test.
+
+Signal handlers stop/wait for owned children before releasing locks. If a build
+container is interrupted, the lab requests its shutdown as well as terminating
+the CLI. No other containers are stopped.
+
+Run host regression tests without containers, a kernel build or a VM:
+
+```sh
+python3 -B -m unittest discover -s tests -v
+bash -n bin/* scripts/*.sh
+sh -n scripts/guest-init.sh
+```
+
+The mocked workflow tests cover source provenance, running-VM symbol selection,
+absolute/spaced fragments, explicit empty config values, failed KUnit checks,
+smoke deadlines and interrupted-container cleanup. GitHub Actions runs them on
+pull requests and pushes. Real HVF/SSH/kernel checks still require an Apple
+Silicon Mac.

@@ -8,26 +8,21 @@ if [[ ${1:-} == --ssh ]]; then
 fi
 if [[ ${1:-} == --attach-gdb ]]; then
   shift
-  ref=${1:-}
-  if [[ -n $ref ]]; then
-    resolve_build "$ref"
-  else
-    [[ -f "$LAB_STATE/last-build" ]] || die 'Run build-linux --debug first.'
-    LAB_KEY=$(cat "$LAB_STATE/last-build")
-    LAB_ARTIFACTS="$LAB_STATE/builds/$LAB_KEY"
-  fi
-  [[ -s "$LAB_ARTIFACTS/vmlinux" ]] || die "No vmlinux found in $LAB_ARTIFACTS; build with: build-linux --debug"
-  gdb_port=$LAB_GDB_PORT
+  expected_key=""
+  if [[ -n ${1:-} ]]; then resolve_build "$1"; expected_key=$LAB_KEY; fi
+  settings=$(python3 "$LAB_DIR/scripts/lab-state.py" active "$LAB_STATE") || die 'No running guest with a GDB stub.'
+  eval "$settings"
+  [[ -z $expected_key || $expected_key == "$LAB_KEY" ]] || die 'That ref is not the running guest.'
+  [[ -s "$LAB_ARTIFACTS/vmlinux" ]] || die 'The running guest has no debug symbols; rebuild with --debug.'
+  mapping=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1])+" "+json.dumps(sys.argv[2]))' "$LAB_CONTAINER_SOURCE" "$LAB_BUILD_SOURCE")
   if command -v aarch64-elf-gdb >/dev/null 2>&1; then
     exec aarch64-elf-gdb "$LAB_ARTIFACTS/vmlinux" \
-      -ex "set substitute-path /work/$LAB_KEY/src $LAB_SOURCE" \
-      -ex "target remote 127.0.0.1:$gdb_port"
+      -ex "set substitute-path $mapping" -ex "target remote 127.0.0.1:$LAB_ACTIVE_GDB_PORT"
   elif command -v lldb >/dev/null 2>&1; then
     exec lldb "$LAB_ARTIFACTS/vmlinux" \
-      -o "settings set target.source-map /work/$LAB_KEY/src $LAB_SOURCE" \
-      -o "gdb-remote 127.0.0.1:$gdb_port"
+      -o "settings set target.source-map $mapping" -o "gdb-remote 127.0.0.1:$LAB_ACTIVE_GDB_PORT"
   else
-    die 'Install aarch64-elf-gdb (brew install aarch64-elf-gdb) or Xcode Command Line Tools (lldb).'
+    die 'Install aarch64-elf-gdb or Xcode Command Line Tools (lldb).'
   fi
 fi
 if [[ ${1:-} == --help ]]; then
@@ -45,6 +40,7 @@ for arg in "$@"; do
     --smoke) smoke=1 ;;
     --gdb) gdb=1 ;;
     --gdb-wait) gdb=1; gdb_wait=1 ;;
+    --*) die "Unknown option: $arg" ;;
     *) [[ -z $ref ]] || die 'Only one Git ref may be supplied.'; ref=$arg ;;
   esac
 done
@@ -52,18 +48,17 @@ require_tool qemu-system-aarch64
 require_tool qemu-img
 if [[ -n $ref ]]; then
   resolve_build "$ref"
+  select_artifacts "$LAB_KEY"
 else
-  [[ -f "$LAB_STATE/last-build" ]] || die 'Run build-linux first.'
-  LAB_KEY=$(cat "$LAB_STATE/last-build")
-  LAB_ARTIFACTS="$LAB_STATE/builds/$LAB_KEY"
+  select_artifacts
 fi
 [[ -s "$LAB_ARTIFACTS/Image" ]] || die 'No kernel found for this ref; run build-linux for it first.'
 [[ -s "$LAB_STATE/$LAB_ROOTFS_NAME" ]] || die 'Run setup-linux-lab first.'
 acquire_lock "$LAB_STATE/guest.lock" "Guest already running"
-trap 'release_lock "$LAB_STATE/guest.lock"' EXIT INT TERM HUP
+install_lifecycle "$LAB_STATE/guest.lock"
 
 rootfs_base="${LAB_ROOTFS_NAME%.raw}"
-disk="$LAB_ARTIFACTS/${rootfs_base}.qcow2"
+disk="$LAB_STATE/builds/$LAB_KEY/${rootfs_base}.qcow2"
 if [[ ! -f $disk ]]; then
   qemu-img create -f qcow2 -F raw -b "$LAB_STATE/$LAB_ROOTFS_NAME" "$disk"
   if [[ -f "$LAB_STATE/ssh/known_hosts" ]]; then
@@ -110,11 +105,19 @@ Host linux-lab
 CONFIG
 echo "SSH from another terminal: launch-linux --ssh (127.0.0.1:$ssh_port)"
 
-virtfs_args=()
-if [[ -n "${LAB_SOURCE:-}" && -d "$LAB_SOURCE" ]]; then
-  virtfs_args=(-virtfs "local,path=$LAB_SOURCE,mount_tag=linuxsrc,security_model=none,readonly=on")
+[[ -d "$LAB_BUILD_SOURCE/kernel" ]] || die 'Matching source snapshot is missing; rebuild this ref.'
+virtfs_args=(-virtfs "local,path=$LAB_BUILD_SOURCE,mount_tag=linuxsrc,security_model=none,readonly=on")
+timeout_args=()
+if [[ $smoke == 1 ]]; then
+  case "$LAB_SMOKE_TIMEOUT" in ''|*[!0-9]*) die 'smoke_timeout must be a positive integer.' ;; esac
+  [[ $LAB_SMOKE_TIMEOUT -gt 0 ]] || die 'smoke_timeout must be positive.'
+  [[ $gdb_wait == 0 ]] || die '--smoke cannot be combined with --gdb-wait.'
+  timeout_args=(--timeout "$LAB_SMOKE_TIMEOUT")
 fi
-
+run_owned python3 "$LAB_DIR/scripts/run-command.py" \
+  --guest-state "$LAB_STATE/guest.json" --manifest "$LAB_ARTIFACTS/manifest.json" \
+  --gdb-port "$([[ $gdb == 1 ]] && echo "$LAB_GDB_PORT" || echo 0)" --ssh-port "$ssh_port" \
+  ${timeout_args[@]+"${timeout_args[@]}"} -- \
 qemu-system-aarch64 -machine virt,gic-version=3 -accel "$accel" -cpu "$cpu" \
   -smp "$LAB_VM_CPUS" -m "$LAB_VM_MEMORY" \
   -kernel "$LAB_ARTIFACTS/Image" -append "$cmdline ${LAB_EXTRA_KERNEL_ARGS:-}" \

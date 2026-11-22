@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")/.." && pwd)/scripts/common.sh"
 require_tool container
 acquire_lock "$LAB_STATE/build.lock" "A setup or build already holds the work volume"
-trap 'release_lock "$LAB_STATE/build.lock"' EXIT INT TERM HUP
+install_lifecycle "$LAB_STATE/build.lock"
 container system start
 mkdir -p "$LAB_STATE/ssh"
 chmod 700 "$LAB_STATE/ssh"
@@ -12,7 +12,7 @@ if [[ ! -f "$LAB_STATE/ssh/id_ed25519" ]]; then
 fi
 if ! container image inspect "$LAB_IMAGE" >/dev/null 2>&1; then
   bootstrap="linux-lab-bootstrap-$$"
-  container run --name "$bootstrap" --cpus 4 --memory 4G --entrypoint /bin/bash \
+  run_owned python3 "$LAB_DIR/scripts/run-command.py" --container-name "$bootstrap" -- container run --name "$bootstrap" --cpus 4 --memory 4G --entrypoint /bin/bash \
     --mount "type=bind,source=$LAB_DIR,target=/lab,readonly" \
     debian:trixie-slim /lab/scripts/provision-builder.sh
   container commit "$bootstrap" "$LAB_IMAGE"
@@ -22,7 +22,8 @@ if ! container volume inspect "$LAB_VOLUME" >/dev/null 2>&1; then
   container volume create -s 64G "$LAB_VOLUME"
 fi
 if [[ ! -f "$LAB_STATE/$LAB_ROOTFS_NAME" ]]; then
-  container run --rm --cpus 2 --memory 2G --entrypoint /bin/bash \
+  rootfs_container="linux-lab-rootfs-$$"
+  run_owned python3 "$LAB_DIR/scripts/run-command.py" --container-name "$rootfs_container" -- container run --rm --name "$rootfs_container" --cpus 2 --memory 2G --entrypoint /bin/bash \
     -v "$LAB_VOLUME:/work" \
     --mount "type=bind,source=$LAB_DIR,target=/lab,readonly" \
     -v "$LAB_STATE:/artifacts" "$LAB_IMAGE" /lab/scripts/prepare-rootfs.sh "$LAB_ROOTFS_NAME"
